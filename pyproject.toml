@@ -3,9 +3,9 @@ name = "badminton-ai"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "mediapipe>=0.10.35",
-    "numpy>=2.5.0",
-    "opencv-python>=4.13.0.92",
+    "mediapipe==0.10.21",
+    "numpy<2",
+    "opencv-python",
 ]
