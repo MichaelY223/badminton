@@ -5,10 +5,14 @@ import numpy as np
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/smash.mp4"
+VIDEO_PATH = "videos/input/singles clip.mp4"
 
 # Hitting arm side - flip to "LEFT" for a left-handed player
 ARM_SIDE = "RIGHT"
+
+# Fixed size for the playback window (output file keeps the source resolution)
+DISPLAY_WIDTH = 960
+DISPLAY_HEIGHT = 540
 
 
 def calculate_angle(a, b, c):
@@ -47,6 +51,14 @@ def put_angle_text(image, text, point, frame_shape):
 
 
 cap = cv2.VideoCapture(VIDEO_PATH)
+
+# Get source video properties so the output matches
+fps = cap.get(cv2.CAP_PROP_FPS)
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # see note below
+out = cv2.VideoWriter("videos/output/output_skeleton.mp4", fourcc, fps, (width, height))
 
 with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
     while cap.isOpened():
@@ -126,6 +138,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                                   )
 
         cv2.imshow("Video", image)
+
+        out.write(image)  # write the annotated BGR frame
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
