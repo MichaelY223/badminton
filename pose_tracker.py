@@ -1,18 +1,15 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+from ultralytics import YOLO
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/input/singles clip.mp4"
+VIDEO_PATH = "videos/input/smash.mp4"
 
 # Hitting arm side - flip to "LEFT" for a left-handed player
 ARM_SIDE = "RIGHT"
-
-# Fixed size for the playback window (output file keeps the source resolution)
-DISPLAY_WIDTH = 960
-DISPLAY_HEIGHT = 540
 
 
 def calculate_angle(a, b, c):

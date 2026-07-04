@@ -8,4 +8,6 @@ dependencies = [
     "mediapipe==0.10.21",
     "numpy<2",
     "opencv-python",
+    "scipy>=1.17.1",
+    "ultralytics>=8.4.87",
 ]
