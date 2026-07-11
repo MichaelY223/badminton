@@ -12,7 +12,8 @@ VIDEO_PATH = "videos/input/smash.mp4"
 
 # Playback window is capped to this width so the display fits on screen
 # regardless of source video resolution
-DISPLAY_WIDTH = 960
+MAX_DISPLAY_WIDTH = 1920
+MAX_DISPLAY_HEIGHT = 1080
 
 
 def put_angle_text(image, text, point, frame_shape):
@@ -28,9 +29,12 @@ cap = cv2.VideoCapture(VIDEO_PATH)
 fps = cap.get(cv2.CAP_PROP_FPS)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-display_height = int(height * DISPLAY_WIDTH / width)
 
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # see note below
+scale = min(MAX_DISPLAY_WIDTH / width, MAX_DISPLAY_HEIGHT / height)
+display_width = int(width * scale)
+display_height = int(height * scale)
+
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out = cv2.VideoWriter("videos/output/output_skeleton.mp4", fourcc, fps, (width, height))
 
 prev_wrist_px = None
@@ -80,7 +84,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(image, f"Wrist velocity: {features['wrist_velocity']:.0f} px/frame", (10, 105),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-        except Exception:
+        except Exception as e:
+            print(f"Error occurred: {e}") 
             prev_wrist_px = None
 
         # Render detections
@@ -89,7 +94,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                                   mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2)
                                   )
 
-        display = cv2.resize(image, (DISPLAY_WIDTH, display_height))
+        display = cv2.resize(image, (display_width, display_height))
         cv2.imshow("Video", display)
 
         out.write(image)  # write the annotated BGR frame (source resolution)
