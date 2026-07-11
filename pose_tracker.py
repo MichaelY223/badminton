@@ -3,41 +3,16 @@ import mediapipe as mp
 import numpy as np
 from ultralytics import YOLO
 
+from feature_extraction import ARM_SIDE, extract_frame_features, get_point
+
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
 VIDEO_PATH = "videos/input/smash.mp4"
 
-# Hitting arm side - flip to "LEFT" for a left-handed player
-ARM_SIDE = "RIGHT"
-
-
-def calculate_angle(a, b, c):
-    """Angle at point b, formed by rays b->a and b->c, in degrees."""
-    a = np.array(a)  # First point
-    b = np.array(b)  # Mid point
-    c = np.array(c)  # End point
-
-    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
-
-    if angle > 180.0:
-        angle = 360 - angle
-
-    return angle
-
-
-def calculate_tilt_from_vertical(top, bottom):
-    """Angle of the top->bottom vector from the vertical axis, in degrees."""
-    dx = top[0] - bottom[0]
-    dy = top[1] - bottom[1]
-    angle = np.degrees(np.arctan2(abs(dx), abs(dy)))
-    return angle
-
-
-def get_point(landmarks, landmark):
-    lm = landmarks[landmark.value]
-    return [lm.x, lm.y]
+# Playback window is capped to this width so the display fits on screen
+# regardless of source video resolution
+DISPLAY_WIDTH = 960
 
 
 def put_angle_text(image, text, point, frame_shape):
@@ -53,9 +28,12 @@ cap = cv2.VideoCapture(VIDEO_PATH)
 fps = cap.get(cv2.CAP_PROP_FPS)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+display_height = int(height * DISPLAY_WIDTH / width)
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # see note below
 out = cv2.VideoWriter("videos/output/output_skeleton.mp4", fourcc, fps, (width, height))
+
+prev_wrist_px = None
 
 with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
     while cap.isOpened():
@@ -74,59 +52,36 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         image.flags.writeable = True
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-        # Extract landmarks and compute smash-relevant angles
+        # Extract landmarks and compute smash-relevant features
         try:
             landmarks = results.pose_landmarks.landmark
-            side = mp_pose.PoseLandmark
+            features, prev_wrist_px = extract_frame_features(
+                landmarks, mp_pose.PoseLandmark, width, height, prev_wrist_px, ARM_SIDE
+            )
 
-            shoulder = get_point(landmarks, getattr(side, f"{ARM_SIDE}_SHOULDER"))
-            elbow = get_point(landmarks, getattr(side, f"{ARM_SIDE}_ELBOW"))
-            wrist = get_point(landmarks, getattr(side, f"{ARM_SIDE}_WRIST"))
-            index = get_point(landmarks, getattr(side, f"{ARM_SIDE}_INDEX"))
-            hip = get_point(landmarks, getattr(side, f"{ARM_SIDE}_HIP"))
-            knee = get_point(landmarks, getattr(side, f"{ARM_SIDE}_KNEE"))
-            ankle = get_point(landmarks, getattr(side, f"{ARM_SIDE}_ANKLE"))
-            opp_shoulder = get_point(landmarks, getattr(side, "LEFT_SHOULDER" if ARM_SIDE == "RIGHT" else "RIGHT_SHOULDER"))
-            opp_hip = get_point(landmarks, getattr(side, "LEFT_HIP" if ARM_SIDE == "RIGHT" else "RIGHT_HIP"))
-            nose = get_point(landmarks, side.NOSE)
-
-            # Elbow angle: how extended the hitting arm is on contact
-            elbow_angle = calculate_angle(shoulder, elbow, wrist)
-
-            # Shoulder angle: arm elevation relative to torso (racket-up position)
-            shoulder_angle = calculate_angle(elbow, shoulder, hip)
-
-            # Wrist snap angle: elbow-wrist-index, tracks the pronation/snap that drives smash speed
-            wrist_angle = calculate_angle(elbow, wrist, index)
-
-            # Hip/knee angle: front-leg loading and extension for jump smashes
-            knee_angle = calculate_angle(hip, knee, ankle)
-
-            # Trunk rotation: shoulder line vs hip line, twist between upper/lower body
-            trunk_rotation = calculate_angle(opp_shoulder, shoulder, hip) - calculate_angle(opp_hip, hip, shoulder)
-
-            # Torso lean from vertical: forward/backward body tilt at contact
-            torso_lean = calculate_tilt_from_vertical(shoulder, hip)
-
-            # Contact height: wrist position relative to shoulder (negative y = above shoulder, ideal for a smash)
-            contact_height = shoulder[1] - wrist[1]
+            shoulder_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_SHOULDER"))
+            elbow_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_ELBOW"))
+            wrist_px_norm = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_WRIST"))
+            knee_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_KNEE"))
 
             for text, point in [
-                (f"Elbow: {elbow_angle:.0f}", elbow),
-                (f"Shoulder: {shoulder_angle:.0f}", shoulder),
-                (f"Wrist: {wrist_angle:.0f}", wrist),
-                (f"Knee: {knee_angle:.0f}", knee),
+                (f"Elbow: {features['elbow_angle']:.0f}", elbow_px),
+                (f"Shoulder: {features['shoulder_angle']:.0f}", shoulder_px),
+                (f"Wrist: {features['wrist_angle']:.0f}", wrist_px_norm),
+                (f"Knee: {features['knee_angle']:.0f}", knee_px),
             ]:
                 put_angle_text(image, text, point, image.shape)
 
-            cv2.putText(image, f"Trunk rotation: {trunk_rotation:.0f} deg", (10, 30),
+            cv2.putText(image, f"Trunk rotation: {features['trunk_rotation']:.0f} deg", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Torso lean: {torso_lean:.0f} deg", (10, 55),
+            cv2.putText(image, f"Torso lean: {features['torso_lean']:.0f} deg", (10, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Contact height (rel. shoulder): {contact_height:.2f}", (10, 80),
+            cv2.putText(image, f"Contact height (rel. shoulder): {features['contact_height']:.2f}", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(image, f"Wrist velocity: {features['wrist_velocity']:.0f} px/frame", (10, 105),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
         except Exception:
-            pass
+            prev_wrist_px = None
 
         # Render detections
         mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
@@ -134,9 +89,10 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                                   mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2)
                                   )
 
-        cv2.imshow("Video", image)
+        display = cv2.resize(image, (DISPLAY_WIDTH, display_height))
+        cv2.imshow("Video", display)
 
-        out.write(image)  # write the annotated BGR frame
+        out.write(image)  # write the annotated BGR frame (source resolution)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
