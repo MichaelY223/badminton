@@ -8,7 +8,7 @@ from feature_extraction import ARM_SIDE, extract_frame_features, get_point
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/input/singles_test_clip.mp4"
+VIDEO_PATH = "videos/input/long_singles.mp4"
 
 # Playback window is capped to this width so the display fits on screen
 # regardless of source video resolution
@@ -57,7 +57,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
         # Extract landmarks and compute smash-relevant features
-        try:
+        if not results.pose_landmarks:
+            prev_wrist_px = None
+        else:
             landmarks = results.pose_landmarks.landmark
             features, prev_wrist_px = extract_frame_features(
                 landmarks, mp_pose.PoseLandmark, width, height, prev_wrist_px, ARM_SIDE
@@ -84,9 +86,6 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(image, f"Wrist velocity: {features['wrist_displacement']:.0f} px/frame", (10, 105),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-        except Exception as e:
-            print(f"Error occurred: {e}") 
-            prev_wrist_px = None
 
         # Render detections
         mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,

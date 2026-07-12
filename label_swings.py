@@ -1,3 +1,4 @@
+import argparse
 import csv
 import os
 
@@ -10,7 +11,7 @@ from feature_extraction import ARM_SIDE, extract_frame_features, get_point
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/input/singles_test_clip.mp4"
+DEFAULT_VIDEO_PATH = "videos/input/long_singles.mp4"
 
 # Playback window is capped to this width so the display fits on screen
 # regardless of source video resolution
@@ -18,10 +19,15 @@ MAX_DISPLAY_WIDTH = 1920
 MAX_DISPLAY_HEIGHT = 1080
 
 LABELS_PATH = "data/labels/labels.csv"
-LABEL_FIELDS = ["video", "start_frame", "end_frame", "start_time", "end_time", "shot_type"]
+LABEL_FIELDS = ["video", "start_frame", "end_frame", "start_time", "end_time"]
+
+parser = argparse.ArgumentParser(description="Step through a video and mark swing start/end frames.")
+parser.add_argument("video_path", nargs="?", default=DEFAULT_VIDEO_PATH)
+args = parser.parse_args()
+VIDEO_PATH = args.video_path
 
 
-def append_label(video_name, start_frame, end_frame, fps, shot_type):
+def append_swing(video_name, start_frame, end_frame, fps):
     os.makedirs(os.path.dirname(LABELS_PATH), exist_ok=True)
     write_header = not os.path.exists(LABELS_PATH) or os.path.getsize(LABELS_PATH) == 0
     with open(LABELS_PATH, "a", newline="") as f:
@@ -34,7 +40,6 @@ def append_label(video_name, start_frame, end_frame, fps, shot_type):
             "end_frame": end_frame,
             "start_time": start_frame / fps,
             "end_time": end_frame / fps,
-            "shot_type": shot_type,
         })
 
 
@@ -158,7 +163,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             if pending_start_frame is not None:
                 print(f"Cancelled swing start at frame {pending_start_frame}")
                 pending_start_frame = None
-        elif key == ord('e'):  # mark swing end and prompt for shot type
+        elif key == ord('e'):  # mark swing end and save the swing range
             if pending_start_frame is None:
                 print("No swing start marked yet (press 's' first)")
             else:
@@ -166,15 +171,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 start_frame, end_frame = pending_start_frame, frame_idx
                 if end_frame < start_frame:
                     start_frame, end_frame = end_frame, start_frame
-                shot_type = input(
-                    f"Shot type for frames {start_frame}-{end_frame} "
-                    "(smash/clear/drop/drive/net/serve, blank to cancel): "
-                ).strip()
-                if shot_type:
-                    append_label(video_name, start_frame, end_frame, fps, shot_type)
-                    print(f"Saved label: {video_name} {start_frame}-{end_frame} {shot_type}")
-                else:
-                    print("Cancelled (no shot type entered)")
+                append_swing(video_name, start_frame, end_frame, fps)
+                print(f"Saved swing: {video_name} {start_frame}-{end_frame}")
                 pending_start_frame = None
         elif not paused:
             frame_idx += 1
