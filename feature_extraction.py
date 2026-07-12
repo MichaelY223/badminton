@@ -4,9 +4,9 @@ import numpy as np
 ARM_SIDE = "RIGHT"
 
 FEATURE_NAMES = [
-    "elbow_angle", "shoulder_angle", "wrist_angle", "knee_angle",
+    "elbow_angle", "shoulder_angle", "wrist_angle", "knee_angle", "other_knee_angle",
     "trunk_rotation", "torso_lean", "contact_height",
-    "wrist_x", "wrist_y", "wrist_displacement",
+    "wrist_x", "wrist_y", "wrist_displacement", "wrist_displacement_norm",
 ]
 
 
@@ -70,6 +70,14 @@ def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev
     wrist_px = np.array([wrist[0] * frame_w, wrist[1] * frame_h])
     wrist_displacement = float(np.linalg.norm(wrist_px - prev_wrist_px)) if prev_wrist_px is not None else 0.0
 
+    # Shoulder width in pixels scales with how zoomed-in/close the camera is to the
+    # player, so dividing by it makes wrist_displacement comparable across videos
+    # shot at different distances/resolutions
+    shoulder_px = np.array([shoulder[0] * frame_w, shoulder[1] * frame_h])
+    opp_shoulder_px = np.array([opp_shoulder[0] * frame_w, opp_shoulder[1] * frame_h])
+    shoulder_width_px = float(np.linalg.norm(shoulder_px - opp_shoulder_px))
+    wrist_displacement_norm = wrist_displacement / shoulder_width_px if shoulder_width_px > 1e-6 else 0.0
+
     features = {
         # Elbow angle: how extended the hitting arm is
         "elbow_angle": calculate_angle(shoulder, elbow, wrist),
@@ -90,6 +98,7 @@ def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev
         "wrist_x": wrist[0],
         "wrist_y": wrist[1],
         "wrist_displacement": wrist_displacement,
+        "wrist_displacement_norm": wrist_displacement_norm,
     }
 
     return features, wrist_px
