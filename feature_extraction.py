@@ -57,8 +57,11 @@ def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev
     wrist = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_WRIST"))
     index = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_INDEX"))
     hip = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_HIP"))
+    other_hip = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_HIP")) # TEMP
     knee = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_KNEE"))
+    other_knee = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_KNEE")) # TEMP
     ankle = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_ANKLE"))
+    other_ankle = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_ANKLE")) # TEMP
     opp_shoulder = get_point(landmarks, getattr(landmark_enum, "LEFT_SHOULDER" if arm_side == "RIGHT" else "RIGHT_SHOULDER"))
     opp_hip = get_point(landmarks, getattr(landmark_enum, "LEFT_HIP" if arm_side == "RIGHT" else "RIGHT_HIP"))
 
@@ -76,6 +79,8 @@ def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev
         "wrist_angle": calculate_angle(elbow, wrist, index),
         # Hip/knee angle: front-leg loading and extension for jump shots
         "knee_angle": calculate_angle(hip, knee, ankle),
+        # Other knee angle: for comparison with the active leg
+        "other_knee_angle": calculate_angle(other_hip, other_knee, other_ankle),
         # Trunk rotation: shoulder line vs hip line, twist between upper/lower body
         "trunk_rotation": calculate_angle(opp_shoulder, shoulder, hip) - calculate_angle(opp_hip, hip, shoulder),
         # Torso lean from vertical: forward/backward body tilt

@@ -1,2 +1,5 @@
 photos/
 videos/
+data/
+*.jpg
+test.py

@@ -8,7 +8,7 @@ from feature_extraction import ARM_SIDE, extract_frame_features, get_point
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/input/smash.mp4"
+VIDEO_PATH = "videos/input/singles_test_clip.mp4"
 
 # Playback window is capped to this width so the display fits on screen
 # regardless of source video resolution
@@ -82,7 +82,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(image, f"Contact height (rel. shoulder): {features['contact_height']:.2f}", (10, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Wrist velocity: {features['wrist_velocity']:.0f} px/frame", (10, 105),
+            cv2.putText(image, f"Wrist velocity: {features['wrist_displacement']:.0f} px/frame", (10, 105),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
         except Exception as e:
             print(f"Error occurred: {e}") 
