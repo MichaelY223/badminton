@@ -1,153 +1,152 @@
+"""Build a window-level training dataset from hit-event labels.
+
+One row per window: positives are centered on labeled hit frames, negatives are
+sampled from frames the labeler actually reviewed (data/labels/reviewed/) at a
+safe distance from every hit. Window statistics - including angular velocities -
+summarize the temporal shape a single frame can't capture.
+"""
+import glob
 import os
 
 import cv2
-import mediapipe as mp
+import numpy as np
 import pandas as pd
 
-from feature_extraction import ARM_SIDE, FEATURE_NAMES, extract_frame_features
+from extract_features import extract_video_features, features_path_for
+from feature_extraction import FEATURE_NAMES
 
-mp_pose = mp.solutions.pose
-
-LABELS_PATH = "data/labels/labels.csv"
-FEATURES_DIR = "data/features"
-CANDIDATES_DIR = "data/labels/candidates"
+HITS_PATH = "data/labels/hits.csv"
+REVIEWED_DIR = "data/labels/reviewed"
 VIDEO_DIR = "videos/input"
-OUTPUT_PATH = "data/training/dataset.csv"
+OUTPUT_PATH = "data/training/windows.csv"
 
-INCLUDED_VIDEOS = {
-    "singles_test_clip": "singles_test_clip.mp4",
-    "long_singles": "long_singles.mp4",
-}
+WINDOW_SEC = 0.5        # window half-width around the hit: covers backswing -> follow-through
+MIN_COVERAGE = 0.8      # fraction of window frames that must have detected landmarks
+NEG_MIN_GAP_SEC = 1.0   # negative window centers stay at least this far from any hit
+NEG_STRIDE_SEC = 0.5    # spacing between candidate negative centers
 
-# Frames beyond a video's last labeled swing haven't been reviewed yet, so they
-# can't be trusted as "not swing" negatives
-REVIEW_BUFFER_FRAMES = 30
+# Features summarized over the window. Raw wrist_x/wrist_y are excluded: they
+# encode camera framing, not the swing.
+BASE_COLS = ["elbow_angle", "shoulder_angle", "wrist_angle", "knee_angle", "other_knee_angle",
+             "trunk_rotation", "torso_lean", "contact_height", "wrist_speed"]
+# Angular velocity carries the "rate of change" signal a static pose lacks
+DERIV_COLS = ["elbow_angle", "shoulder_angle", "wrist_angle", "knee_angle", "other_knee_angle",
+              "trunk_rotation"]
 
-# Rolling window (in frames) used to summarize recent motion, since a swing is a
-# multi-frame motion pattern that a single frame's joint angles can't capture
-ROLL_WINDOW = 10
+
+def find_video_file(video_name):
+    matches = glob.glob(os.path.join(VIDEO_DIR, f"{video_name}.*"))
+    if not matches:
+        raise FileNotFoundError(f"No video file for '{video_name}' in {VIDEO_DIR}")
+    return matches[0]
 
 
-def extract_features_up_to(video_path, max_frame, arm_side=ARM_SIDE):
+def video_fps(video_path):
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    rows = []
-    prev_wrist_px = None
-    frame_idx = 0
-
-    with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
-        while cap.isOpened() and frame_idx <= max_frame:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(image)
-
-            row = {"frame_idx": frame_idx, "timestamp": frame_idx / fps, "landmarks_detected": False}
-            row.update({name: None for name in FEATURE_NAMES})
-
-            if results.pose_landmarks:
-                features, prev_wrist_px = extract_frame_features(
-                    results.pose_landmarks.landmark, mp_pose.PoseLandmark, width, height, prev_wrist_px, arm_side,
-                )
-                row["landmarks_detected"] = True
-                row.update(features)
-            else:
-                prev_wrist_px = None
-
-            rows.append(row)
-            frame_idx += 1
-
     cap.release()
-    return pd.DataFrame(rows)
+    return fps
 
 
-def load_or_extract_features(video_name, video_file, max_frame):
-    features_path = os.path.join(FEATURES_DIR, f"{video_name}.csv")
-    if os.path.exists(features_path):
-        df = pd.read_csv(features_path)
-        has_all_columns = set(FEATURE_NAMES).issubset(df.columns)
-        if has_all_columns and df["frame_idx"].max() >= max_frame:
+def load_features(video_name, player):
+    video_path = find_video_file(video_name)
+    path = features_path_for(video_path, player)
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        if set(FEATURE_NAMES).issubset(df.columns):
             return df
-
-    video_path = os.path.join(VIDEO_DIR, video_file)
-    print(f"Extracting {video_name} features up to frame {max_frame}...")
-    df = extract_features_up_to(video_path, max_frame)
-    os.makedirs(FEATURES_DIR, exist_ok=True)
-    df.to_csv(features_path, index=False)
+    print(f"Extracting features for {video_name} ({player}) - this may take a while...")
+    df = extract_video_features(video_path, player)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path, index=False)
     return df
 
 
-def add_rolling_motion_features(features):
-    """Summarize recent wrist motion so the model sees a window, not just one frame.
+def load_reviewed_intervals(video_name, player):
+    path = os.path.join(REVIEWED_DIR, f"{video_name}_{player}.csv")
+    if not os.path.exists(path):
+        return []
+    df = pd.read_csv(path)
+    return [(int(r["start_frame"]), int(r["end_frame"])) for _, r in df.iterrows()]
 
-    Computed over the full sequential frame range (before filtering down to reviewed
-    frames) so the rolling stats reflect true temporal neighbors, not gaps introduced
-    by candidate-window filtering.
+
+def window_features(features, center, half_width, fps):
+    """Summary statistics for the window [center-half_width, center+half_width].
+
+    Returns None if too few frames in the window have detected landmarks.
     """
-    roll = features["wrist_displacement_norm"].rolling(ROLL_WINDOW, min_periods=1)
-    features["wrist_displacement_norm_roll_max"] = roll.max()
-    features["wrist_displacement_norm_roll_std"] = roll.std().fillna(0.0)
-    return features
+    lo, hi = center - half_width, center + half_width
+    win = features[(features["frame_idx"] >= lo) & (features["frame_idx"] <= hi)]
+    win = win[win["landmarks_detected"]]
+    if len(win) < MIN_COVERAGE * (2 * half_width + 1):
+        return None
 
+    row = {}
+    for col in BASE_COLS:
+        vals = win[col].astype(float)
+        row[f"{col}_mean"] = vals.mean()
+        row[f"{col}_std"] = vals.std()
+        row[f"{col}_min"] = vals.min()
+        row[f"{col}_max"] = vals.max()
 
-def known_frame_mask(frame_idx, video_name, video_labels):
-    """Which frames were actually reviewed and can be trusted as "not swing" negatives.
-
-    If label_swings.py was run with --candidates, the reviewer only saw the padded
-    windows around each candidate up through the last labeled swing - the gaps
-    between candidates were never displayed, so they can't be treated as negatives.
-    Otherwise the video was scrubbed continuously, so everything through the last
-    labeled swing (plus a small buffer) was reviewed.
-    """
-    reviewed_boundary = int(video_labels["end_frame"].max())
-    candidates_path = os.path.join(CANDIDATES_DIR, f"{video_name}.csv")
-    if os.path.exists(candidates_path):
-        candidates = pd.read_csv(candidates_path)
-        reviewed = candidates[candidates["start_frame"] <= reviewed_boundary]
-        print(f"  {video_name}: treating {len(reviewed)}/{len(candidates)} candidate windows "
-              f"(start_frame <= {reviewed_boundary}) as reviewed")
-        mask = pd.Series(False, index=frame_idx.index)
-        for _, c in reviewed.iterrows():
-            mask |= frame_idx.between(c["start_frame"], c["end_frame"])
-        return mask
-    return frame_idx <= reviewed_boundary + REVIEW_BUFFER_FRAMES
+    # Derivatives only between genuinely consecutive frames, so detection gaps
+    # don't masquerade as huge velocities
+    consecutive = win["frame_idx"].diff() == 1
+    for col in DERIV_COLS:
+        deriv = (win[col].diff() * fps)[consecutive].astype(float)
+        row[f"{col}_vel_absmax"] = deriv.abs().max() if len(deriv) else 0.0
+        row[f"{col}_vel_std"] = deriv.std() if len(deriv) > 1 else 0.0
+    return row
 
 
 def main():
-    labels = pd.read_csv(LABELS_PATH)
-    labels = labels[labels["video"].isin(INCLUDED_VIDEOS)]
-
+    if not os.path.exists(HITS_PATH):
+        print(f"No hit labels yet ({HITS_PATH} missing) - label some hits first with label_swings.py.")
+        return
+    hits = pd.read_csv(HITS_PATH)
     all_rows = []
-    for video_name, video_file in INCLUDED_VIDEOS.items():
-        video_labels = labels[labels["video"] == video_name]
-        extract_cap = int(video_labels["end_frame"].max()) + REVIEW_BUFFER_FRAMES
 
-        features = load_or_extract_features(video_name, video_file, extract_cap)
-        features = features[features["landmarks_detected"]].sort_values("frame_idx").copy()
-        features = add_rolling_motion_features(features)
+    for (video_name, player), group in hits.groupby(["video", "player"]):
+        video_path = find_video_file(video_name)
+        fps = video_fps(video_path)
+        half_width = round(WINDOW_SEC * fps)
+        features = load_features(video_name, player)
+        hit_frames = group["hit_frame"].astype(int).to_numpy()
 
-        known = known_frame_mask(features["frame_idx"], video_name, video_labels)
-        features = features[known].copy()
+        n_pos = n_neg = 0
+        for _, hit in group.iterrows():
+            row = window_features(features, int(hit["hit_frame"]), half_width, fps)
+            if row is None:
+                continue
+            row.update({"video": video_name, "player": player, "center_frame": int(hit["hit_frame"]),
+                        "is_swing": 1, "stroke_type": hit["stroke_type"]})
+            all_rows.append(row)
+            n_pos += 1
 
-        is_swing = pd.Series(False, index=features.index)
-        for _, row in video_labels.iterrows():
-            is_swing |= features["frame_idx"].between(row["start_frame"], row["end_frame"])
-        features["is_swing"] = is_swing.astype(int)
-        features["video"] = video_name
+        min_gap = round(NEG_MIN_GAP_SEC * fps)
+        stride = max(round(NEG_STRIDE_SEC * fps), 1)
+        for start, end in load_reviewed_intervals(video_name, player):
+            for center in range(start + half_width, end - half_width + 1, stride):
+                if len(hit_frames) and np.min(np.abs(hit_frames - center)) < min_gap:
+                    continue
+                row = window_features(features, center, half_width, fps)
+                if row is None:
+                    continue
+                row.update({"video": video_name, "player": player, "center_frame": center,
+                            "is_swing": 0, "stroke_type": ""})
+                all_rows.append(row)
+                n_neg += 1
 
-        all_rows.append(features)
+        print(f"{video_name} ({player}): {n_pos} swing windows, {n_neg} negative windows")
 
-    dataset = pd.concat(all_rows, ignore_index=True)
+    if not all_rows:
+        print("No windows produced - label some hits first (label_swings.py).")
+        return
+
+    dataset = pd.DataFrame(all_rows)
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     dataset.to_csv(OUTPUT_PATH, index=False)
-
-    print(f"\nWrote {len(dataset)} rows to {OUTPUT_PATH}")
-    print(dataset.groupby("video")["is_swing"].agg(["sum", "count"]))
+    print(f"\nWrote {len(dataset)} windows to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

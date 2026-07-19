@@ -1,17 +1,19 @@
+"""Play a video with the tracked player's skeleton and features overlaid,
+and write the annotated video to videos/output/output_skeleton.mp4."""
+import argparse
+import os
+
 import cv2
 import mediapipe as mp
 import numpy as np
-from ultralytics import YOLO
 
-from feature_extraction import ARM_SIDE, extract_frame_features, get_point
+from feature_extraction import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
+from pose_pipeline import PlayerPoseTracker
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-VIDEO_PATH = "videos/input/long_singles.mp4"
-
-# Playback window is capped to this width so the display fits on screen
-# regardless of source video resolution
+# Playback window is capped to this size so the display fits on screen
 MAX_DISPLAY_WIDTH = 1920
 MAX_DISPLAY_HEIGHT = 1080
 
@@ -23,83 +25,75 @@ def put_angle_text(image, text, point, frame_shape):
                 (255, 255, 255), 1, cv2.LINE_AA)
 
 
-cap = cv2.VideoCapture(VIDEO_PATH)
+parser = argparse.ArgumentParser(description="View pose tracking with feature overlays.")
+parser.add_argument("video_path", nargs="?", default="videos/input/long_singles.mp4")
+parser.add_argument("--player", default="near", choices=["near", "far"])
+parser.add_argument("--mirror", action="store_true")
+args = parser.parse_args()
 
-# Get source video properties so the output matches
+cap = cv2.VideoCapture(args.video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 scale = min(MAX_DISPLAY_WIDTH / width, MAX_DISPLAY_HEIGHT / height)
-display_width = int(width * scale)
-display_height = int(height * scale)
+display_size = (int(width * scale), int(height * scale))
 
+os.makedirs("videos/output", exist_ok=True)
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out = cv2.VideoWriter("videos/output/output_skeleton.mp4", fourcc, fps, (width, height))
 
+tracker = PlayerPoseTracker(court_side=args.player, mirror=args.mirror, model_complexity=1)
 prev_wrist_px = None
 
-with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-        # Recolor image to RGB
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
+    results, crop_box, frame = tracker.process(frame)
+    image = frame.copy()
 
-        # Make detection
-        results = pose.process(image)
+    if results is None or not results.pose_landmarks or \
+            not landmarks_are_reliable(results.pose_landmarks.landmark, mp_pose.PoseLandmark, ARM_SIDE):
+        prev_wrist_px = None
+    else:
+        landmarks = results.pose_landmarks.landmark
+        features, prev_wrist_px = extract_frame_features(
+            landmarks, mp_pose.PoseLandmark, width, height, fps, prev_wrist_px, ARM_SIDE
+        )
 
-        # Recolor back to BGR for rendering
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        for text, point in [
+            (f"Elbow: {features['elbow_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_ELBOW"))),
+            (f"Shoulder: {features['shoulder_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_SHOULDER"))),
+            (f"Wrist: {features['wrist_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_WRIST"))),
+            (f"Knee: {features['knee_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_KNEE"))),
+        ]:
+            put_angle_text(image, text, point, image.shape)
 
-        # Extract landmarks and compute smash-relevant features
-        if not results.pose_landmarks:
-            prev_wrist_px = None
-        else:
-            landmarks = results.pose_landmarks.landmark
-            features, prev_wrist_px = extract_frame_features(
-                landmarks, mp_pose.PoseLandmark, width, height, prev_wrist_px, ARM_SIDE
-            )
+        cv2.putText(image, f"Trunk rotation: {features['trunk_rotation']:.0f} deg", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, f"Torso lean: {features['torso_lean']:.0f} deg", (10, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, f"Contact height: {features['contact_height']:.2f} torso", (10, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(image, f"Wrist speed: {features['wrist_speed']:.1f} torso/s", (10, 105),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
-            shoulder_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_SHOULDER"))
-            elbow_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_ELBOW"))
-            wrist_px_norm = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_WRIST"))
-            knee_px = get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_KNEE"))
-
-            for text, point in [
-                (f"Elbow: {features['elbow_angle']:.0f}", elbow_px),
-                (f"Shoulder: {features['shoulder_angle']:.0f}", shoulder_px),
-                (f"Wrist: {features['wrist_angle']:.0f}", wrist_px_norm),
-                (f"Knee: {features['knee_angle']:.0f}", knee_px),
-            ]:
-                put_angle_text(image, text, point, image.shape)
-
-            cv2.putText(image, f"Trunk rotation: {features['trunk_rotation']:.0f} deg", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Torso lean: {features['torso_lean']:.0f} deg", (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Contact height (rel. shoulder): {features['contact_height']:.2f}", (10, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(image, f"Wrist velocity: {features['wrist_displacement']:.0f} px/frame", (10, 105),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-
-        # Render detections
+    if results is not None and results.pose_landmarks:
         mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
                                   mp_drawing.DrawingSpec(color=(80, 255, 80), thickness=2, circle_radius=2),
-                                  mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2)
-                                  )
+                                  mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2))
+    if crop_box is not None:
+        cv2.rectangle(image, crop_box[:2], crop_box[2:], (0, 200, 255), 2)
 
-        display = cv2.resize(image, (display_width, display_height))
-        cv2.imshow("Video", display)
+    cv2.imshow("Video", cv2.resize(image, display_size))
+    out.write(image)
 
-        out.write(image)  # write the annotated BGR frame (source resolution)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
 cap.release()
+out.release()
+tracker.close()
 cv2.destroyAllWindows()

@@ -1,21 +1,32 @@
 import numpy as np
 
-# Hitting arm side - flip to "LEFT" for a left-handed player
+# Hitting arm side. Left-handed players are handled by mirroring frames in the
+# pose pipeline (PlayerPoseTracker(mirror=True)), so feature code always sees RIGHT.
 ARM_SIDE = "RIGHT"
 
 FEATURE_NAMES = [
     "elbow_angle", "shoulder_angle", "wrist_angle", "knee_angle", "other_knee_angle",
     "trunk_rotation", "torso_lean", "contact_height",
-    "wrist_x", "wrist_y", "wrist_displacement", "wrist_displacement_norm",
+    "wrist_x", "wrist_y", "wrist_speed",
 ]
+
+# MediaPipe can report pose_landmarks for a frame even when a point has snapped to a
+# clearly wrong position (e.g. off the edge of the frame). Landmark coordinates
+# outside roughly this margin around [0, 1] are treated as not actually detected.
+#
+# Visibility score was tried first instead of this bounds check, but it backfired:
+# the hitting arm's elbow/wrist/index have the lowest visibility of any landmark
+# specifically because fast arm motion causes motion blur - and that's most likely to
+# happen during an actual swing, so gating on visibility disproportionately threw out
+# the frames we care about most.
+COORD_BOUNDS_MARGIN = 0.1
 
 
 def calculate_angle(a, b, c):
     """Angle at point b, formed by rays b->a and b->c, in degrees."""
-    # Each of a, b, c is a 2D point (x, y)
-    a = np.array(a)  # First point
-    b = np.array(b)  # Mid point
-    c = np.array(c)  # End point
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
 
     radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
     angle = np.abs(radians * 180.0 / np.pi)
@@ -38,45 +49,74 @@ def get_point(landmarks, landmark):
     return [lm.x, lm.y]
 
 
-def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev_wrist_px=None, arm_side=ARM_SIDE):
+def used_landmark_names(arm_side=ARM_SIDE):
+    """Every landmark name extract_frame_features actually reads, for the given arm side."""
+    other_side = "LEFT" if arm_side == "RIGHT" else "RIGHT"
+    return [
+        f"{arm_side}_SHOULDER", f"{arm_side}_ELBOW", f"{arm_side}_WRIST", f"{arm_side}_INDEX",
+        f"{arm_side}_HIP", f"{arm_side}_KNEE", f"{arm_side}_ANKLE",
+        f"{other_side}_HIP", f"{other_side}_KNEE", f"{other_side}_ANKLE", f"{other_side}_SHOULDER",
+    ]
+
+
+def landmarks_are_reliable(landmarks, pose_landmark_enum, arm_side=ARM_SIDE, margin=COORD_BOUNDS_MARGIN):
+    """Whether every landmark extract_frame_features uses has a plausible position.
+
+    Checking this (rather than just "did MediaPipe return pose_landmarks at all") catches
+    frames where a person was detected but a point snapped somewhere nonsensical, like
+    off the edge of the frame.
+    """
+    lo, hi = -margin, 1 + margin
+    return all(
+        lo <= landmarks[getattr(pose_landmark_enum, name).value].x <= hi and
+        lo <= landmarks[getattr(pose_landmark_enum, name).value].y <= hi
+        for name in used_landmark_names(arm_side)
+    )
+
+
+def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, fps,
+                           prev_wrist_px=None, arm_side=ARM_SIDE):
     """Compute one frame's swing-analysis features from MediaPipe pose landmarks.
 
+    All geometry is computed in pixel space: normalized coordinates scale x by width
+    and y by height, which distorts angles on non-square frames.
+
+    Motion is expressed in torso-lengths per second: torso length (mid-shoulder to
+    mid-hip) is stable under trunk rotation, unlike shoulder width which foreshortens
+    mid-swing, and fps scaling keeps the same physical swing comparable between videos
+    recorded at different frame rates.
+
     Returns (features, wrist_px). Pass wrist_px back in as prev_wrist_px on the next
-    frame to get a continuous wrist_displacement signal; pass None to reset it (e.g. after
-    a frame with no detected landmarks, so a multi-frame gap isn't read as one huge jump).
+    frame for a continuous wrist_speed signal; pass None to reset it (e.g. after a
+    frame with no reliable landmarks, so a gap isn't read as one huge jump).
     """
-    # Use the pose_landmark_enum to access the correct landmark indices
     landmark_enum = pose_landmark_enum
+    other_side = "LEFT" if arm_side == "RIGHT" else "RIGHT"
 
-    # f"{armside}_SHOULDER" is a string like "RIGHT_SHOULDER", which is the name of the enum member we want to access
-    # getattr(landmark_enum, ...) gets the enum member by name, and then use it to index into landmarks to get actual landmark data
-    # landmarks is a list of landmark objects, each with x, y, z and visibility attributes
-    # getpoint(landmarks, ...) returns a list of [x, y] coordinates for the specified landmark
-    shoulder = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_SHOULDER"))
-    elbow = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_ELBOW"))
-    wrist = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_WRIST"))
-    index = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_INDEX"))
-    hip = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_HIP"))
-    other_hip = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_HIP")) # TEMP
-    knee = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_KNEE"))
-    other_knee = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_KNEE")) # TEMP
-    ankle = get_point(landmarks, getattr(landmark_enum, f"{arm_side}_ANKLE"))
-    other_ankle = get_point(landmarks, getattr(landmark_enum, f"{'LEFT' if arm_side == 'RIGHT' else 'RIGHT'}_ANKLE")) # TEMP
-    opp_shoulder = get_point(landmarks, getattr(landmark_enum, "LEFT_SHOULDER" if arm_side == "RIGHT" else "RIGHT_SHOULDER"))
-    opp_hip = get_point(landmarks, getattr(landmark_enum, "LEFT_HIP" if arm_side == "RIGHT" else "RIGHT_HIP"))
+    def px(name):
+        lm = landmarks[getattr(landmark_enum, name).value]
+        return np.array([lm.x * frame_w, lm.y * frame_h])
 
-    # Format: [x, y] in normalized coordinates (0-1)
+    shoulder = px(f"{arm_side}_SHOULDER")
+    elbow = px(f"{arm_side}_ELBOW")
+    wrist = px(f"{arm_side}_WRIST")
+    index = px(f"{arm_side}_INDEX")
+    hip = px(f"{arm_side}_HIP")
+    knee = px(f"{arm_side}_KNEE")
+    ankle = px(f"{arm_side}_ANKLE")
+    other_hip = px(f"{other_side}_HIP")
+    other_knee = px(f"{other_side}_KNEE")
+    other_ankle = px(f"{other_side}_ANKLE")
+    opp_shoulder = px(f"{other_side}_SHOULDER")
 
-    wrist_px = np.array([wrist[0] * frame_w, wrist[1] * frame_h])
-    wrist_displacement = float(np.linalg.norm(wrist_px - prev_wrist_px)) if prev_wrist_px is not None else 0.0
+    mid_shoulder = (shoulder + opp_shoulder) / 2
+    mid_hip = (hip + other_hip) / 2
+    torso_px = float(np.linalg.norm(mid_shoulder - mid_hip))
+    if torso_px < 1e-6:
+        torso_px = 1.0
 
-    # Shoulder width in pixels scales with how zoomed-in/close the camera is to the
-    # player, so dividing by it makes wrist_displacement comparable across videos
-    # shot at different distances/resolutions
-    shoulder_px = np.array([shoulder[0] * frame_w, shoulder[1] * frame_h])
-    opp_shoulder_px = np.array([opp_shoulder[0] * frame_w, opp_shoulder[1] * frame_h])
-    shoulder_width_px = float(np.linalg.norm(shoulder_px - opp_shoulder_px))
-    wrist_displacement_norm = wrist_displacement / shoulder_width_px if shoulder_width_px > 1e-6 else 0.0
+    wrist_displacement_px = float(np.linalg.norm(wrist - prev_wrist_px)) if prev_wrist_px is not None else 0.0
+    wrist_speed = (wrist_displacement_px * fps) / torso_px
 
     features = {
         # Elbow angle: how extended the hitting arm is
@@ -90,15 +130,17 @@ def extract_frame_features(landmarks, pose_landmark_enum, frame_w, frame_h, prev
         # Other knee angle: for comparison with the active leg
         "other_knee_angle": calculate_angle(other_hip, other_knee, other_ankle),
         # Trunk rotation: shoulder line vs hip line, twist between upper/lower body
-        "trunk_rotation": calculate_angle(opp_shoulder, shoulder, hip) - calculate_angle(opp_hip, hip, shoulder),
+        "trunk_rotation": calculate_angle(opp_shoulder, shoulder, hip) - calculate_angle(other_hip, hip, shoulder),
         # Torso lean from vertical: forward/backward body tilt
-        "torso_lean": calculate_tilt_from_vertical(shoulder, hip),
-        # Wrist height relative to shoulder (negative y = above shoulder)
-        "contact_height": shoulder[1] - wrist[1],
-        "wrist_x": wrist[0],
-        "wrist_y": wrist[1],
-        "wrist_displacement": wrist_displacement,
-        "wrist_displacement_norm": wrist_displacement_norm,
+        "torso_lean": calculate_tilt_from_vertical(mid_shoulder, mid_hip),
+        # Wrist height above shoulder, in torso lengths (positive = above shoulder)
+        "contact_height": float(shoulder[1] - wrist[1]) / torso_px,
+        # Raw normalized wrist position, kept for debugging/display only -
+        # excluded from models because it encodes camera framing
+        "wrist_x": wrist[0] / frame_w,
+        "wrist_y": wrist[1] / frame_h,
+        # Wrist speed in torso-lengths per second
+        "wrist_speed": wrist_speed,
     }
 
-    return features, wrist_px
+    return features, wrist
