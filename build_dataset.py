@@ -10,11 +10,10 @@ mp_pose = mp.solutions.pose
 
 LABELS_PATH = "data/labels/labels.csv"
 FEATURES_DIR = "data/features"
+CANDIDATES_DIR = "data/labels/candidates"
 VIDEO_DIR = "videos/input"
 OUTPUT_PATH = "data/training/dataset.csv"
 
-# smash's single 136-frame label predates frame-accurate stepping controls in
-# label_swings.py and is too coarse to trust as a real swing boundary
 INCLUDED_VIDEOS = {
     "singles_test_clip": "singles_test_clip.mp4",
     "long_singles": "long_singles.mp4",
@@ -84,11 +83,39 @@ def load_or_extract_features(video_name, video_file, max_frame):
 
 
 def add_rolling_motion_features(features):
-    """Summarize recent wrist motion so the model sees a window, not just one frame."""
+    """Summarize recent wrist motion so the model sees a window, not just one frame.
+
+    Computed over the full sequential frame range (before filtering down to reviewed
+    frames) so the rolling stats reflect true temporal neighbors, not gaps introduced
+    by candidate-window filtering.
+    """
     roll = features["wrist_displacement_norm"].rolling(ROLL_WINDOW, min_periods=1)
     features["wrist_displacement_norm_roll_max"] = roll.max()
     features["wrist_displacement_norm_roll_std"] = roll.std().fillna(0.0)
     return features
+
+
+def known_frame_mask(frame_idx, video_name, video_labels):
+    """Which frames were actually reviewed and can be trusted as "not swing" negatives.
+
+    If label_swings.py was run with --candidates, the reviewer only saw the padded
+    windows around each candidate up through the last labeled swing - the gaps
+    between candidates were never displayed, so they can't be treated as negatives.
+    Otherwise the video was scrubbed continuously, so everything through the last
+    labeled swing (plus a small buffer) was reviewed.
+    """
+    reviewed_boundary = int(video_labels["end_frame"].max())
+    candidates_path = os.path.join(CANDIDATES_DIR, f"{video_name}.csv")
+    if os.path.exists(candidates_path):
+        candidates = pd.read_csv(candidates_path)
+        reviewed = candidates[candidates["start_frame"] <= reviewed_boundary]
+        print(f"  {video_name}: treating {len(reviewed)}/{len(candidates)} candidate windows "
+              f"(start_frame <= {reviewed_boundary}) as reviewed")
+        mask = pd.Series(False, index=frame_idx.index)
+        for _, c in reviewed.iterrows():
+            mask |= frame_idx.between(c["start_frame"], c["end_frame"])
+        return mask
+    return frame_idx <= reviewed_boundary + REVIEW_BUFFER_FRAMES
 
 
 def main():
@@ -98,12 +125,14 @@ def main():
     all_rows = []
     for video_name, video_file in INCLUDED_VIDEOS.items():
         video_labels = labels[labels["video"] == video_name]
-        max_frame = int(video_labels["end_frame"].max()) + REVIEW_BUFFER_FRAMES
+        extract_cap = int(video_labels["end_frame"].max()) + REVIEW_BUFFER_FRAMES
 
-        features = load_or_extract_features(video_name, video_file, max_frame)
-        features = features[features["frame_idx"] <= max_frame].copy()
+        features = load_or_extract_features(video_name, video_file, extract_cap)
         features = features[features["landmarks_detected"]].sort_values("frame_idx").copy()
         features = add_rolling_motion_features(features)
+
+        known = known_frame_mask(features["frame_idx"], video_name, video_labels)
+        features = features[known].copy()
 
         is_swing = pd.Series(False, index=features.index)
         for _, row in video_labels.iterrows():

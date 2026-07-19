@@ -5,6 +5,7 @@ import os
 import cv2
 import mediapipe as mp
 import numpy as np
+import pandas as pd
 
 from feature_extraction import ARM_SIDE, extract_frame_features, get_point
 
@@ -23,8 +24,12 @@ LABEL_FIELDS = ["video", "start_frame", "end_frame", "start_time", "end_time"]
 
 parser = argparse.ArgumentParser(description="Step through a video and mark swing start/end frames.")
 parser.add_argument("video_path", nargs="?", default=DEFAULT_VIDEO_PATH)
+parser.add_argument("--candidates", help="CSV of candidate swing windows (from find_swing_candidates.py) "
+                                          "to jump between with 'n'/'p' instead of scrubbing manually")
 args = parser.parse_args()
 VIDEO_PATH = args.video_path
+
+CANDIDATE_LEAD_FRAMES = 15  # jump slightly before each candidate's start so you see the wind-up
 
 
 def append_swing(video_name, start_frame, end_frame, fps):
@@ -71,6 +76,18 @@ last_written_idx = -1
 paused = False
 video_name = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
 pending_start_frame = None
+
+candidates = None
+candidate_idx = 0
+if args.candidates:
+    candidates = pd.read_csv(args.candidates).sort_values("start_frame").reset_index(drop=True)
+    candidates = candidates[candidates["video"] == video_name].reset_index(drop=True)
+    if len(candidates):
+        frame_idx = max(int(candidates.loc[0, "start_frame"]) - CANDIDATE_LEAD_FRAMES, 0)
+        paused = True
+        print(f"Loaded {len(candidates)} candidates for {video_name}. 'n'/'p' to jump between them.")
+    else:
+        print(f"No candidates found for {video_name} in {args.candidates}")
 
 with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
     while cap.isOpened():
@@ -129,6 +146,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                                   )
 
         status = f"Frame {frame_idx}/{total_frames - 1}{'  [PAUSED]' if paused else ''}"
+        if candidates is not None and len(candidates):
+            status += f"  [candidate {candidate_idx + 1}/{len(candidates)}]"
         if pending_start_frame is not None:
             status += f"  [swing start @ {pending_start_frame}]"
         cv2.putText(image, status, (10, height - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
@@ -174,6 +193,18 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 append_swing(video_name, start_frame, end_frame, fps)
                 print(f"Saved swing: {video_name} {start_frame}-{end_frame}")
                 pending_start_frame = None
+        elif key == ord('n') and candidates is not None and len(candidates):  # jump to next candidate
+            candidate_idx = min(candidate_idx + 1, len(candidates) - 1)
+            frame_idx = max(int(candidates.loc[candidate_idx, "start_frame"]) - CANDIDATE_LEAD_FRAMES, 0)
+            paused = True
+            pending_start_frame = None
+            prev_wrist_px = None
+        elif key == ord('p') and candidates is not None and len(candidates):  # jump to previous candidate
+            candidate_idx = max(candidate_idx - 1, 0)
+            frame_idx = max(int(candidates.loc[candidate_idx, "start_frame"]) - CANDIDATE_LEAD_FRAMES, 0)
+            paused = True
+            pending_start_frame = None
+            prev_wrist_px = None
         elif not paused:
             frame_idx += 1
 
