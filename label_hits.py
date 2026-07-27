@@ -107,7 +107,8 @@ def put_angle_text(image, text, point, frame_shape):
 
 parser = argparse.ArgumentParser(description="Step through a video and label hit events with stroke types.")
 parser.add_argument("video_path")
-parser.add_argument("--candidates", help="CSV of candidate hit windows (from find_hit_candidates.py) "
+parser.add_argument("--candidates", help="CSV of candidate hit windows (from find_hit_candidates_audio.py or "
+                                          "find_hit_candidates_motion.py) "
                                           "to jump between with 'n'/'p' instead of scrubbing manually")
 parser.add_argument("--player", default="near", choices=["near", "far"],
                     help="which player to track and label (near = bottom of frame)")

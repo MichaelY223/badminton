@@ -39,8 +39,10 @@ class PlayerPoseTracker:
     def _pick_target(self, boxes):
         if not len(boxes):
             return None
-        # The two largest detections are the players; court side disambiguates them
-        # by bottom edge (the near player stands lower in the image)
+
+        # Boxes is a list of 4 values [x1, y1, x2, y2] in pixels, marking the corners of a detected person's bounding box
+        # Calculates the area of each box, and sorts in reverse (largest first), then takes the two largest boxes
+        # Assumes that the two largest boxes are the players, and then picks the one with the largest/smallest y2 value depending on the court side (near/far)
         boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)[:2]
         pick = max if self.court_side == "near" else min
         return pick(boxes, key=lambda b: b[3])
@@ -58,8 +60,7 @@ class PlayerPoseTracker:
             frame_bgr = cv2.flip(frame_bgr, 1)
         h, w = frame_bgr.shape[:2]
 
-        det = self.detector.predict(frame_bgr, classes=[PERSON_CLASS], conf=DETECTION_CONF,
-                                    verbose=False)[0]
+        det = self.detector.predict(frame_bgr, classes=[PERSON_CLASS], conf=DETECTION_CONF, verbose=False)[0]
         boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
         target = self._pick_target(list(boxes))
         if target is not None:
@@ -71,12 +72,17 @@ class PlayerPoseTracker:
             x0, y0, x1, y1 = 0, 0, w, h
         else:
             bx0, by0, bx1, by1 = self.box
+            # Increase the crop box by a fraction of its size so the racket arm stays in frame at full extension
             mx, my = (bx1 - bx0) * CROP_MARGIN, (by1 - by0) * CROP_MARGIN
+
+            # Top left is reduced by the margin to move it left/up but not beyond the frame
+            # Bottom right is increased by the margin to move it right/down but not beyond the frame
             x0 = int(max(bx0 - mx, 0))
             y0 = int(max(by0 - my, 0))
             x1 = int(min(bx1 + mx, w))
             y1 = int(min(by1 + my, h))
 
+        # Crops out just the part of the frame that is in the bounding box of the player to run pose detection on
         crop = frame_bgr[y0:y1, x0:x1]
         if crop.size == 0:
             return None, None, frame_bgr

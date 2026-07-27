@@ -101,7 +101,7 @@ def window_features(features, center, half_width, fps):
 
 def main():
     if not os.path.exists(HITS_PATH):
-        print(f"No hit labels yet ({HITS_PATH} missing) - label some hits first with label_swings.py.")
+        print(f"No hit labels yet ({HITS_PATH} missing) - label some hits first with label_hits.py.")
         return
     hits = pd.read_csv(HITS_PATH)
     all_rows = []
@@ -140,7 +140,7 @@ def main():
         print(f"{video_name} ({player}): {n_pos} swing windows, {n_neg} negative windows")
 
     if not all_rows:
-        print("No windows produced - label some hits first (label_swings.py).")
+        print("No windows produced - label some hits first (label_hits.py).")
         return
 
     dataset = pd.DataFrame(all_rows)

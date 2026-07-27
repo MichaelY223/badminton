@@ -3,12 +3,12 @@
 A racket impact is a sharp transient with strong high-frequency content, so
 onset detection runs on the >2 kHz band only - voices, footsteps and crowd
 noise live mostly below that. Candidates are written in the same CSV format as
-find_swing_candidates.py, so label_swings.py --candidates works unchanged.
+find_hit_candidates_motion.py, so label_hits.py --candidates works unchanged.
 
 Validation against 28 hand-labeled swings in long_singles (far-court camera,
 noisy audio): 50% of swings had an onset within +/-6 frames, at ~75 candidates
 per minute. On footage like that, prefer the motion-based generator
-(find_swing_candidates.py); audio is worth retrying on recordings made closer
+(find_hit_candidates_motion.py); audio is worth retrying on recordings made closer
 to the court.
 """
 import argparse

@@ -1,6 +1,6 @@
 """Find candidate hit windows from wrist-motion peaks.
 
-Fallback for videos with unusable audio - prefer find_hit_candidates.py (audio
+Fallback for videos with unusable audio - prefer find_hit_candidates_audio.py (audio
 onsets), which localizes the contact instant far more precisely than motion peaks.
 """
 import argparse

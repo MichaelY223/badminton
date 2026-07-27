@@ -24,7 +24,7 @@ def put_angle_text(image, text, point, frame_shape):
     cv2.putText(image, text, coord, cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                 (255, 255, 255), 1, cv2.LINE_AA)
 
-
+# CL arguments for video path, player side, and mirror mode. Defaults to the near player and long_singles.mp4
 parser = argparse.ArgumentParser(description="View pose tracking with feature overlays.")
 parser.add_argument("video_path", nargs="?", default="videos/input/long_singles.mp4")
 parser.add_argument("--player", default="near", choices=["near", "far"])
@@ -54,8 +54,7 @@ while cap.isOpened():
     results, crop_box, frame = tracker.process(frame)
     image = frame.copy()
 
-    if results is None or not results.pose_landmarks or \
-            not landmarks_are_reliable(results.pose_landmarks.landmark, mp_pose.PoseLandmark, ARM_SIDE):
+    if results is None or not results.pose_landmarks or not landmarks_are_reliable(results.pose_landmarks.landmark, mp_pose.PoseLandmark, ARM_SIDE):
         prev_wrist_px = None
     else:
         landmarks = results.pose_landmarks.landmark

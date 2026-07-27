@@ -60,11 +60,9 @@ def used_landmark_names(arm_side=ARM_SIDE):
 
 
 def landmarks_are_reliable(landmarks, pose_landmark_enum, arm_side=ARM_SIDE, margin=COORD_BOUNDS_MARGIN):
-    """Whether every landmark extract_frame_features uses has a plausible position.
-
-    Checking this (rather than just "did MediaPipe return pose_landmarks at all") catches
-    frames where a person was detected but a point snapped somewhere nonsensical, like
-    off the edge of the frame.
+    """
+    Whether every landmark extract_frame_features uses has a plausible position.
+    Checking this catches frames where a person was detected but a point snapped somewhere nonsesical.
     """
     lo, hi = -margin, 1 + margin
     return all(
