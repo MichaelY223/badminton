@@ -19,8 +19,8 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 
-from feature_extraction import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
-from pose_pipeline import PlayerPoseTracker
+from pose_features import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
+from pose_tracker import PlayerPoseTracker
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose

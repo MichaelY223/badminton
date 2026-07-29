@@ -5,8 +5,8 @@ import cv2
 import mediapipe as mp
 import pandas as pd
 
-from feature_extraction import ARM_SIDE, FEATURE_NAMES, extract_frame_features, landmarks_are_reliable
-from pose_pipeline import PlayerPoseTracker
+from pose_features import ARM_SIDE, FEATURE_NAMES, extract_frame_features, landmarks_are_reliable
+from pose_tracker import PlayerPoseTracker
 
 mp_pose = mp.solutions.pose
 

@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from extract_features import extract_video_features, features_path_for
-from feature_extraction import FEATURE_NAMES
+from build_features_csv import extract_video_features, features_path_for
+from pose_features import FEATURE_NAMES
 
 HITS_PATH = "data/labels/hits.csv"
 REVIEWED_DIR = "data/labels/reviewed"

@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
-from extract_features import extract_video_features, features_path_for
-from feature_extraction import FEATURE_NAMES
+from build_features_csv import extract_video_features, features_path_for
+from pose_features import FEATURE_NAMES
 
 CANDIDATES_DIR = "data/labels/candidates"
 

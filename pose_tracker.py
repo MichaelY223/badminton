@@ -1,98 +1,101 @@
-"""Play a video with the tracked player's skeleton and features overlaid,
-and write the annotated video to videos/output/output_skeleton.mp4."""
-import argparse
-import os
-
 import cv2
 import mediapipe as mp
 import numpy as np
+from ultralytics import YOLO
 
-from feature_extraction import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
-from pose_pipeline import PlayerPoseTracker
-
-mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
-# Playback window is capped to this size so the display fits on screen
-MAX_DISPLAY_WIDTH = 1920
-MAX_DISPLAY_HEIGHT = 1080
+PERSON_CLASS = 0
+DETECTION_CONF = 0.4
+# Fraction of box size added on each side of the crop so the racket arm stays
+# in frame at full extension
+CROP_MARGIN = 0.35
+# EMA weight on the previous box so the crop doesn't jitter frame to frame
+BOX_SMOOTHING = 0.6
 
 
-def put_angle_text(image, text, point, frame_shape):
-    h, w = frame_shape[:2]
-    coord = tuple(np.multiply(point, [w, h]).astype(int))
-    cv2.putText(image, text, coord, cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (255, 255, 255), 1, cv2.LINE_AA)
+class PlayerPoseTracker:
+    """Person-detect -> crop -> pose, locked onto one player.
 
-# CL arguments for video path, player side, and mirror mode. Defaults to the near player and long_singles.mp4
-parser = argparse.ArgumentParser(description="View pose tracking with feature overlays.")
-parser.add_argument("video_path", nargs="?", default="videos/input/long_singles.mp4")
-parser.add_argument("--player", default="near", choices=["near", "far"])
-parser.add_argument("--mirror", action="store_true")
-args = parser.parse_args()
+    Fixes two failure modes of running MediaPipe on the full frame:
+    - small/distant subjects: pose runs on a zoomed crop instead of the whole court
+    - two-player footage: MediaPipe is single-person and silently picks whoever is
+      most salient; the crop pins it to the player chosen by court side, so labels
+      and skeletons always describe the same person
 
-cap = cv2.VideoCapture(args.video_path)
-fps = cap.get(cv2.CAP_PROP_FPS)
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    court_side: "near" (bottom of frame) or "far" (top of frame).
+    mirror: flip frames horizontally for left-handed players, so downstream
+    feature code can always treat the hitting arm as RIGHT.
+    """
 
-scale = min(MAX_DISPLAY_WIDTH / width, MAX_DISPLAY_HEIGHT / height)
-display_size = (int(width * scale), int(height * scale))
+    def __init__(self, court_side="near", mirror=False, model_complexity=2):
+        self.court_side = court_side
+        self.mirror = mirror
+        self.detector = YOLO("yolov8n.pt")
+        self.pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5,
+                                 model_complexity=model_complexity)
+        self.box = None  # smoothed [x1, y1, x2, y2] in pixels
 
-os.makedirs("videos/output", exist_ok=True)
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter("videos/output/output_skeleton.mp4", fourcc, fps, (width, height))
+    def _pick_target(self, boxes):
+        if not len(boxes):
+            return None
 
-tracker = PlayerPoseTracker(court_side=args.player, mirror=args.mirror, model_complexity=1)
-prev_wrist_px = None
+        # Boxes is a list of 4 values [x1, y1, x2, y2] in pixels, marking the corners of a detected person's bounding box
+        # Calculates the area of each box, and sorts in reverse (largest first), then takes the two largest boxes
+        # Assumes that the two largest boxes are the players, and then picks the one with the largest/smallest y2 value depending on the court side (near/far)
+        boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)[:2]
+        pick = max if self.court_side == "near" else min
+        return pick(boxes, key=lambda b: b[3])
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+    def process(self, frame_bgr):
+        """Run detection + pose on one frame.
 
-    results, crop_box, frame = tracker.process(frame)
-    image = frame.copy()
+        Returns (results, crop_box, frame_bgr). Landmarks in results are remapped to
+        full-frame normalized coordinates, so drawing and feature extraction work
+        exactly as they would on an uncropped frame. frame_bgr is returned because
+        mirror=True flips it; callers must display/measure on the returned frame.
+        crop_box is (x0, y0, x1, y1) in pixels, or None if no person was found yet.
+        """
+        if self.mirror:
+            frame_bgr = cv2.flip(frame_bgr, 1)
+        h, w = frame_bgr.shape[:2]
 
-    if results is None or not results.pose_landmarks or not landmarks_are_reliable(results.pose_landmarks.landmark, mp_pose.PoseLandmark, ARM_SIDE):
-        prev_wrist_px = None
-    else:
-        landmarks = results.pose_landmarks.landmark
-        features, prev_wrist_px = extract_frame_features(
-            landmarks, mp_pose.PoseLandmark, width, height, fps, prev_wrist_px, ARM_SIDE
-        )
+        det = self.detector.predict(frame_bgr, classes=[PERSON_CLASS], conf=DETECTION_CONF, verbose=False)[0]
+        boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
+        target = self._pick_target(list(boxes))
+        if target is not None:
+            target = np.asarray(target, dtype=float)
+            self.box = target if self.box is None else BOX_SMOOTHING * self.box + (1 - BOX_SMOOTHING) * target
 
-        for text, point in [
-            (f"Elbow: {features['elbow_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_ELBOW"))),
-            (f"Shoulder: {features['shoulder_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_SHOULDER"))),
-            (f"Wrist: {features['wrist_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_WRIST"))),
-            (f"Knee: {features['knee_angle']:.0f}", get_point(landmarks, getattr(mp_pose.PoseLandmark, f"{ARM_SIDE}_KNEE"))),
-        ]:
-            put_angle_text(image, text, point, image.shape)
+        if self.box is None:
+            # No detection yet in this video: fall back to the full frame
+            x0, y0, x1, y1 = 0, 0, w, h
+        else:
+            bx0, by0, bx1, by1 = self.box
+            # Increase the crop box by a fraction of its size so the racket arm stays in frame at full extension
+            mx, my = (bx1 - bx0) * CROP_MARGIN, (by1 - by0) * CROP_MARGIN
 
-        cv2.putText(image, f"Trunk rotation: {features['trunk_rotation']:.0f} deg", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(image, f"Torso lean: {features['torso_lean']:.0f} deg", (10, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(image, f"Contact height: {features['contact_height']:.2f} torso", (10, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(image, f"Wrist speed: {features['wrist_speed']:.1f} torso/s", (10, 105),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+            # Top left is reduced by the margin to move it left/up but not beyond the frame
+            # Bottom right is increased by the margin to move it right/down but not beyond the frame
+            x0 = int(max(bx0 - mx, 0))
+            y0 = int(max(by0 - my, 0))
+            x1 = int(min(bx1 + mx, w))
+            y1 = int(min(by1 + my, h))
 
-    if results is not None and results.pose_landmarks:
-        mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
-                                  mp_drawing.DrawingSpec(color=(80, 255, 80), thickness=2, circle_radius=2),
-                                  mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2))
-    if crop_box is not None:
-        cv2.rectangle(image, crop_box[:2], crop_box[2:], (0, 200, 255), 2)
+        # Crops out just the part of the frame that is in the bounding box of the player to run pose detection on
+        crop = frame_bgr[y0:y1, x0:x1]
+        if crop.size == 0:
+            return None, None, frame_bgr
 
-    cv2.imshow("Video", cv2.resize(image, display_size))
-    out.write(image)
+        results = self.pose.process(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        if results.pose_landmarks:
+            cw, ch = x1 - x0, y1 - y0
+            for lm in results.pose_landmarks.landmark:
+                lm.x = (x0 + lm.x * cw) / w
+                lm.y = (y0 + lm.y * ch) / h
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        crop_box = None if self.box is None else (x0, y0, x1, y1)
+        return results, crop_box, frame_bgr
 
-cap.release()
-out.release()
-tracker.close()
-cv2.destroyAllWindows()
+    def close(self):
+        self.pose.close()
