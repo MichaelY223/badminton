@@ -13,6 +13,7 @@ from scipy.signal import find_peaks
 
 from build_features_csv import extract_video_features, features_path_for
 from pose_features import FEATURE_NAMES
+from pose_tracker import PLAYER_MODES
 
 CANDIDATES_DIR = "data/labels/candidates"
 
@@ -58,7 +59,7 @@ def find_candidates(video_path, video_name, player):
 def main():
     parser = argparse.ArgumentParser(description="Find candidate hit windows from wrist-motion peaks.")
     parser.add_argument("video_path")
-    parser.add_argument("--player", default="near", choices=["near", "far"])
+    parser.add_argument("--player", default="auto", choices=PLAYER_MODES)
     args = parser.parse_args()
 
     video_name = os.path.splitext(os.path.basename(args.video_path))[0]

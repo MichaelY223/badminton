@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from pose_features import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
-from pose_tracker import PlayerPoseTracker
+from pose_tracker import PLAYER_MODES, PlayerPoseTracker
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -110,8 +110,8 @@ parser.add_argument("video_path")
 parser.add_argument("--candidates", help="CSV of candidate hit windows (from find_hit_candidates_audio.py or "
                                           "find_hit_candidates_motion.py) "
                                           "to jump between with 'n'/'p' instead of scrubbing manually")
-parser.add_argument("--player", default="near", choices=["near", "far"],
-                    help="which player to track and label (near = bottom of frame)")
+parser.add_argument("--player", default="auto", choices=PLAYER_MODES,
+                    help="which player to track and label: auto = most prominent person, near = bottom of frame, far = top")
 parser.add_argument("--mirror", action="store_true", help="flip frames horizontally (left-handed player)")
 args = parser.parse_args()
 
@@ -227,11 +227,13 @@ try:
             frame_idx = max(int(candidates.loc[candidate_idx, "start_frame"]) - CANDIDATE_LEAD_FRAMES, 0)
             paused = True
             prev_wrist_px = None
+            tracker.reset()  # the lock from the previous candidate says nothing about this one
         elif key == ord('p') and candidates is not None and len(candidates):
             candidate_idx = max(candidate_idx - 1, 0)
             frame_idx = max(int(candidates.loc[candidate_idx, "start_frame"]) - CANDIDATE_LEAD_FRAMES, 0)
             paused = True
             prev_wrist_px = None
+            tracker.reset()  # the lock from the previous candidate says nothing about this one
         elif not paused:
             frame_idx += 1
 finally:

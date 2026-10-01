@@ -13,6 +13,30 @@ CROP_MARGIN = 0.35
 # EMA weight on the previous box so the crop doesn't jitter frame to frame
 BOX_SMOOTHING = 0.6
 
+PLAYER_MODES = ["auto", "near", "far"]
+# Boxes shorter than this fraction of the tallest box are ignored when picking a
+# player: spectators, line judges, ball kids, partial bodies at the frame edge
+MIN_REL_HEIGHT = 0.3
+# Per-mode weights on the target-selection cues (all cues are normalized to [0, 1]):
+#   size   - box height relative to the tallest person in frame
+#   center - horizontal closeness to the frame center (players are framed centrally;
+#            officials and crowd sit at the sides)
+#   low    - how far down the frame the feet are (proxy for closeness to camera)
+#   high   - inverse of low (far court)
+#   conf   - detector confidence
+SCORE_WEIGHTS = {
+    "auto": {"size": 0.45, "center": 0.30, "low": 0.15, "conf": 0.10},
+    "near": {"size": 0.25, "center": 0.20, "low": 0.45, "conf": 0.10},
+    "far":  {"size": 0.15, "center": 0.35, "high": 0.40, "conf": 0.10},
+}
+# Once locked, a detection continues the track if its center moved less than this
+# many box-heights since the last frame and its height changed by less than this ratio
+MAX_JUMP = 0.6
+MAX_HEIGHT_RATIO = 1.5
+# Frames without a matching detection before the lock is dropped and the target is
+# re-picked by score (e.g. after a broadcast camera cut)
+REACQUIRE_AFTER_FRAMES = 8
+
 
 class PlayerPoseTracker:
     """Person-detect -> crop -> pose, locked onto one player.
@@ -23,29 +47,89 @@ class PlayerPoseTracker:
       most salient; the crop pins it to the player chosen by court side, so labels
       and skeletons always describe the same person
 
-    court_side: "near" (bottom of frame) or "far" (top of frame).
+    court_side: "auto" (most prominent person: big, central, close to camera),
+    "near" (bottom of frame) or "far" (top of frame).
     mirror: flip frames horizontally for left-handed players, so downstream
     feature code can always treat the hitting arm as RIGHT.
+
+    Selection has two stages: when no player is locked, every detection is scored
+    on size/centrality/court position and the best one is locked; after that the
+    lock follows whichever detection continues the previous box, so a momentarily
+    bigger umpire or the other player can't steal the crop. The lock is dropped
+    after REACQUIRE_AFTER_FRAMES frames with no continuing detection.
     """
 
-    def __init__(self, court_side="near", mirror=False, model_complexity=2):
+    def __init__(self, court_side="auto", mirror=False, model_complexity=2):
+        if court_side not in SCORE_WEIGHTS:
+            raise ValueError(f"court_side must be one of {PLAYER_MODES}, got '{court_side}'")
         self.court_side = court_side
         self.mirror = mirror
         self.detector = YOLO("yolov8n.pt")
         self.pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5,
                                  model_complexity=model_complexity)
         self.box = None  # smoothed [x1, y1, x2, y2] in pixels
+        self.locked_box = None  # last raw detection of the tracked player
+        self.frames_unmatched = 0
+        # Last frame's detections as (box, score) for debug drawing; score is None
+        # for frames where the target came from the lock rather than from scoring
+        self.candidates = []
 
-    def _pick_target(self, boxes):
-        if not len(boxes):
+    def reset(self):
+        """Forget the locked player. Call after seeking to an unrelated part of the video."""
+        self.box = None
+        self.locked_box = None
+        self.frames_unmatched = 0
+
+    def _score(self, boxes, confs, w, h):
+        heights = boxes[:, 3] - boxes[:, 1]
+        cues = {
+            "size": heights / heights.max(),
+            "center": 1 - np.abs((boxes[:, 0] + boxes[:, 2]) / 2 - w / 2) / (w / 2),
+            "low": boxes[:, 3] / h,
+            "high": 1 - boxes[:, 3] / h,
+            "conf": confs,
+        }
+        weights = SCORE_WEIGHTS[self.court_side]
+        scores = sum(weight * cues[name] for name, weight in weights.items())
+        return np.where(cues["size"] >= MIN_REL_HEIGHT, scores, -np.inf)
+
+    def _continue_lock(self, boxes):
+        """Index of the detection that continues the locked track, or None."""
+        lx0, ly0, lx1, ly1 = self.locked_box
+        lh = ly1 - ly0
+        centers = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], axis=1)
+        jump = np.linalg.norm(centers - [(lx0 + lx1) / 2, (ly0 + ly1) / 2], axis=1) / lh
+        height_ratio = (boxes[:, 3] - boxes[:, 1]) / lh
+        ok = (jump < MAX_JUMP) & (height_ratio < MAX_HEIGHT_RATIO) & (height_ratio > 1 / MAX_HEIGHT_RATIO)
+        if not ok.any():
             return None
+        return int(np.argmin(np.where(ok, jump, np.inf)))
 
-        # Boxes is a list of 4 values [x1, y1, x2, y2] in pixels, marking the corners of a detected person's bounding box
-        # Calculates the area of each box, and sorts in reverse (largest first), then takes the two largest boxes
-        # Assumes that the two largest boxes are the players, and then picks the one with the largest/smallest y2 value depending on the court side (near/far)
-        boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)[:2]
-        pick = max if self.court_side == "near" else min
-        return pick(boxes, key=lambda b: b[3])
+    def _pick_target(self, boxes, confs, w, h):
+        if self.locked_box is not None and len(boxes):
+            idx = self._continue_lock(boxes)
+            if idx is not None:
+                self.frames_unmatched = 0
+                self.candidates = [(b, None) for b in boxes]
+                return boxes[idx]
+
+        if self.locked_box is not None:
+            self.frames_unmatched += 1
+            if self.frames_unmatched <= REACQUIRE_AFTER_FRAMES:
+                # Brief occlusion or missed detection: hold the crop where it was
+                self.candidates = [(b, None) for b in boxes]
+                return None
+            self.reset()
+
+        if not len(boxes):
+            self.candidates = []
+            return None
+        scores = self._score(boxes, confs, w, h)
+        self.candidates = list(zip(boxes, scores))
+        best = int(np.argmax(scores))
+        if not np.isfinite(scores[best]):
+            return None
+        return boxes[best]
 
     def process(self, frame_bgr):
         """Run detection + pose on one frame.
@@ -61,10 +145,14 @@ class PlayerPoseTracker:
         h, w = frame_bgr.shape[:2]
 
         det = self.detector.predict(frame_bgr, classes=[PERSON_CLASS], conf=DETECTION_CONF, verbose=False)[0]
-        boxes = det.boxes.xyxy.cpu().numpy() if det.boxes is not None else np.empty((0, 4))
-        target = self._pick_target(list(boxes))
+        if det.boxes is not None and len(det.boxes):
+            boxes = det.boxes.xyxy.cpu().numpy().astype(float)
+            confs = det.boxes.conf.cpu().numpy().astype(float)
+        else:
+            boxes, confs = np.empty((0, 4)), np.empty(0)
+        target = self._pick_target(boxes, confs, w, h)
         if target is not None:
-            target = np.asarray(target, dtype=float)
+            self.locked_box = target
             self.box = target if self.box is None else BOX_SMOOTHING * self.box + (1 - BOX_SMOOTHING) * target
 
         if self.box is None:

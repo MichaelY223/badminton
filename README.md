@@ -9,13 +9,25 @@ labels → window dataset → classifier**.
 
 ## How it works
 
-1. **Pose tracking** ([pose_tracker.py](pose_tracker.py)) — a YOLOv8 person detector
-   picks out one target player by court side (near/far), crops tightly around them,
+1. **Pose tracking** ([pose_tracker.py](pose_tracker.py))
+
+   A YOLOv8 person detector
+   picks out one target player, crops tightly around them,
    and runs MediaPipe Pose on the crop. This keeps the tracked skeleton locked to one
    player in multi-person footage and improves pose quality on small/distant subjects
    compared to running MediaPipe on the full frame.
+
+   `--player` chooses who to lock onto: `auto` (default) scores every detected person
+   on size, horizontal centrality and how close to the camera they stand; `near` /
+   `far` weight court side instead. Once chosen, the lock follows that person frame
+   to frame (nearest box of similar size), so a passing umpire or the other player
+   can't steal the crop; it re-picks only after the player is missing for ~8 frames
+   (e.g. a broadcast camera cut). `visualize_pose.py` draws every detection in grey
+   with its score so you can check the choice.
 2. **Feature extraction** ([pose_features.py](pose_features.py),
-   [build_features_csv.py](build_features_csv.py)) — per frame, computes joint angles
+   [build_features_csv.py](build_features_csv.py))
+   
+   Per frame, computes joint angles
    (elbow, shoulder, wrist, knees), trunk rotation, torso lean, contact height, and
    wrist speed. Motion is normalized to torso-lengths per second so features are
    comparable across videos shot at different frame rates and camera distances.
@@ -24,16 +36,24 @@ labels → window dataset → classifier**.
    hit windows from racket-impact audio transients or wrist-speed peaks, so labeling
    long videos means reviewing a short list of candidates instead of scrubbing the
    whole timeline.
-4. **Labeling** ([label_hits.py](label_hits.py)) — an interactive OpenCV player for
-   stepping through a video (or its candidate windows) and marking the contact frame
-   and stroke type (clear, smash, drop, drive, net, lift, serve, other) for each swing.
-5. **Dataset building** ([build_dataset.py](build_dataset.py)) — turns hit labels into
+
+   This method alone proved unreliable and is not heavily used, though it remains available for potential future use. One possible application is as a secondary check on the classifier's output. If the classifier detects a smash and an audio spike occurs at the same time, this could be positive reinforcement that the classification was correct.
+4. **Labeling** ([label_hits.py](label_hits.py))
+
+    An interactive OpenCV player for
+   stepping through a video and marking the contact frame, and stroke type (clear, smash, drop, drive, net, lift, serve, other) for each swing.
+5. **Dataset building** ([build_dataset.py](build_dataset.py))
+    
+    Turns hit labels into
    a window-level training set: positive windows centered on labeled hits, negative
    windows sampled from reviewed-but-unlabeled footage, summarized with window
    statistics (mean/std/min/max) and angular velocities.
-6. **Baseline classifier** ([baseline_swing_classifier.py](baseline_swing_classifier.py)) —
-   a gradient-boosted-tree swing/no-swing classifier, evaluated leave-one-video-out.
-7. **Visualization** ([visualize_pose.py](visualize_pose.py)) — plays back a video with
+6. **Baseline classifier** ([baseline_swing_classifier.py](baseline_swing_classifier.py))
+
+   A gradient-boosted-tree swing/no-swing classifier, evaluated leave-one-video-out.
+7. **Visualization** ([visualize_pose.py](visualize_pose.py)) 
+
+    Plays back a video with
    the tracked skeleton and live feature readout overlaid, and writes it to
    `videos/output/output_skeleton.mp4`.
 
@@ -57,13 +77,13 @@ All commands are run with `uv run`.
 **Preview pose tracking on a video:**
 
 ```bash
-uv run visualize_pose.py videos/input/long_singles.mp4 --player near
+uv run visualize_pose.py videos/input/long_singles.mp4 --player auto
 ```
 
 **Extract per-frame features for a player:**
 
 ```bash
-uv run build_features_csv.py videos/input/long_singles.mp4 --player near
+uv run build_features_csv.py videos/input/long_singles.mp4 --player auto
 ```
 
 Writes to `data/features/<video>_<player>.csv`.
@@ -73,13 +93,13 @@ fall back to motion otherwise):
 
 ```bash
 uv run find_hit_candidates_audio.py videos/input/long_singles.mp4
-uv run find_hit_candidates_motion.py videos/input/long_singles.mp4 --player near
+uv run find_hit_candidates_motion.py videos/input/long_singles.mp4 --player auto
 ```
 
 **Label hits**, optionally stepping between generated candidates:
 
 ```bash
-uv run label_hits.py videos/input/long_singles.mp4 --player near \
+uv run label_hits.py videos/input/long_singles.mp4 --player auto \
     --candidates data/labels/candidates/long_singles_audio.csv
 ```
 

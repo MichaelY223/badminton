@@ -8,7 +8,7 @@ import mediapipe as mp
 import numpy as np
 
 from pose_features import ARM_SIDE, extract_frame_features, get_point, landmarks_are_reliable
-from pose_tracker import PlayerPoseTracker
+from pose_tracker import PLAYER_MODES, PlayerPoseTracker
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -27,7 +27,7 @@ def put_angle_text(image, text, point, frame_shape):
 # CL arguments for video path, player side, and mirror mode. Defaults to the near player and long_singles.mp4
 parser = argparse.ArgumentParser(description="View pose tracking with feature overlays.")
 parser.add_argument("video_path", nargs="?", default="videos/input/long_singles.mp4")
-parser.add_argument("--player", default="near", choices=["near", "far"])
+parser.add_argument("--player", default="auto", choices=PLAYER_MODES)
 parser.add_argument("--mirror", action="store_true")
 args = parser.parse_args()
 
@@ -35,6 +35,9 @@ cap = cv2.VideoCapture(args.video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+if not cap.isOpened() or width == 0 or height == 0:
+    raise SystemExit(f"Could not read video frames from '{args.video_path}' "
+                     "(missing file, or not a video - e.g. an audio-only .mp3)")
 
 scale = min(MAX_DISPLAY_WIDTH / width, MAX_DISPLAY_HEIGHT / height)
 display_size = (int(width * scale), int(height * scale))
@@ -85,6 +88,16 @@ while cap.isOpened():
                                   mp_drawing.DrawingSpec(color=(255, 80, 200), thickness=2, circle_radius=2))
     if crop_box is not None:
         cv2.rectangle(image, crop_box[:2], crop_box[2:], (0, 200, 255), 2)
+
+    # Every detected person in grey, with its selection score when the target was
+    # (re)picked this frame - shows why the tracker chose who it did
+    for box, score in tracker.candidates:
+        x0, y0, x1, y1 = box.astype(int)
+        cv2.rectangle(image, (x0, y0), (x1, y1), (160, 160, 160), 1)
+        if score is not None:
+            label = "ignored" if not np.isfinite(score) else f"{score:.2f}"
+            cv2.putText(image, label, (x0, max(y0 - 5, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (160, 160, 160), 1, cv2.LINE_AA)
 
     cv2.imshow("Video", cv2.resize(image, display_size))
     out.write(image)

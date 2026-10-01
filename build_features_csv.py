@@ -6,7 +6,7 @@ import mediapipe as mp
 import pandas as pd
 
 from pose_features import ARM_SIDE, FEATURE_NAMES, extract_frame_features, landmarks_are_reliable
-from pose_tracker import PlayerPoseTracker
+from pose_tracker import PLAYER_MODES, PlayerPoseTracker
 
 mp_pose = mp.solutions.pose
 
@@ -65,8 +65,8 @@ def extract_video_features(video_path, player="near", mirror=False, arm_side=ARM
 def main():
     parser = argparse.ArgumentParser(description="Extract per-frame pose features for one player to CSV.")
     parser.add_argument("video_path")
-    parser.add_argument("--player", default="near", choices=["near", "far"],
-                        help="which player to track (near = bottom of frame)")
+    parser.add_argument("--player", default="auto", choices=PLAYER_MODES,
+                        help="which player to track: auto = most prominent person (big, central, close to camera), near = bottom of frame, far = top")
     parser.add_argument("--mirror", action="store_true",
                         help="flip frames horizontally (left-handed player)")
     args = parser.parse_args()
